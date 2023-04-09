@@ -5,6 +5,8 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
+import torchvision
+import cv2
 from PIL import Image
 from tqdm import tqdm
 
@@ -67,7 +69,7 @@ def eval(model, test_loader, args, gpus=None, ):
     else:
         device = gpus[0]
 
-    if args.save_dir is not None:
+    if (args.save_dir is not None) and (not (args.save_dir in os.listdir())):
         os.makedirs(args.save_dir)
 
     metrics = RunningAverageDict()
@@ -81,6 +83,8 @@ def eval(model, test_loader, args, gpus=None, ):
         for batch in tqdm(sequential):
 
             image = batch['image'].to(device)
+            if args.input_height != -1 and args.input_width != -1:
+                image = torchvision.transforms.Resize((args.input_height, args.input_width))(image)
             gt = batch['depth'].to(device)
             final = predict_tta(model, image, args)
             final = final.squeeze().cpu().numpy()
@@ -134,6 +138,8 @@ def eval(model, test_loader, args, gpus=None, ):
             #             gt = gt[valid_mask]
             #             final = final[valid_mask]
 
+            if args.input_height != -1 and args.input_width != -1:
+                final = cv2.resize(final, (gt.shape[1], gt.shape[0]))
             metrics.update(compute_errors(gt[valid_mask], final[valid_mask]))
 
     print(f"Total invalid: {total_invalid}")
@@ -172,8 +178,8 @@ if __name__ == '__main__':
                         default="./train_test_inputs/nyudepthv2_train_files_with_gt.txt",
                         type=str, help='path to the filenames text file')
 
-    parser.add_argument('--input_height', type=int, help='input height', default=416)
-    parser.add_argument('--input_width', type=int, help='input width', default=544)
+    parser.add_argument('--input_height', type=int, help='input height', default=-1)
+    parser.add_argument('--input_width', type=int, help='input width', default=-1)
     parser.add_argument('--max_depth', type=float, help='maximum depth in estimation', default=10)
     parser.add_argument('--min_depth', type=float, help='minimum depth in estimation', default=1e-3)
 
