@@ -72,6 +72,11 @@ def main_worker(gpu, ngpus_per_node, args):
 
     model = models.UnetAdaptiveBins.build(n_bins=args.n_bins, min_val=args.min_depth, max_val=args.max_depth,
                                           norm=args.norm)
+    
+    opt = None
+    if args.resume != "":
+        model, opt, epoch = model_io.load_checkpoint(args.resume, model, None)
+        args.epoch = epoch
 
     ################################################################################################
 
@@ -102,10 +107,9 @@ def main_worker(gpu, ngpus_per_node, args):
         model = model.cuda()
         model = torch.nn.DataParallel(model)
 
-    args.epoch = 0
     args.last_epoch = -1
     train(model, args, epochs=args.epochs, lr=args.lr, device=args.gpu, root=args.root,
-          experiment_name=args.name, optimizer_state_dict=None)
+          experiment_name=args.name, optimizer_state_dict=opt)
 
 
 def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root=".", device=None,
@@ -114,6 +118,7 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
     if device is None:
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
+    epochs += args.epoch
     ###################################### Logging setup #########################################
     print(f"Training {experiment_name}")
 
@@ -150,8 +155,9 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
                   {"params": m.get_10x_lr_params(), "lr": lr}]
 
     optimizer = optim.AdamW(params, weight_decay=args.wd, lr=args.lr)
-    if optimizer_state_dict is not None:
+    if optimizer_state_dict != None:
         optimizer.load_state_dict(optimizer_state_dict)
+        pass
     ################################################################################################
     # some globals
     iters = len(train_loader)
@@ -159,13 +165,12 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
     best_loss = np.inf
 
     ###################################### Scheduler ###############################################
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, lr, epochs=epochs, steps_per_epoch=len(train_loader),
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, lr, epochs=epochs*len(train_loader), steps_per_epoch=len(train_loader),
                                               cycle_momentum=True,
-                                              base_momentum=0.85, max_momentum=0.95, last_epoch=args.last_epoch,
+                                              base_momentum=0.85, max_momentum=0.95, last_epoch=step - 1,
                                               div_factor=args.div_factor,
                                               final_div_factor=args.final_div_factor)
-    if args.resume != '' and scheduler is not None:
-        scheduler.step(args.epoch + 1)
+
     ################################################################################################
 
     # max_iter = len(train_loader) * epochs
@@ -207,7 +212,7 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
 
             ########################################################################################################
 
-            if should_write and step % args.validate_every == 0:
+            if should_write and (step % args.validate_every == 0 or i == len(train_loader) - 1):
 
                 ################################# Validation loop ##################################################
                 model.eval()
@@ -314,7 +319,7 @@ if __name__ == '__main__':
                         choices=['linear', 'softmax', 'sigmoid'])
     parser.add_argument("--same-lr", '--same_lr', default=False, action="store_true",
                         help="Use same LR for all param groups")
-    parser.add_argument("--distributed", default=True, action="store_true", help="Use DDP if set")
+    parser.add_argument("--distributed", default=False, action="store_true", help="Use DDP if set")
     parser.add_argument("--root", default=".", type=str,
                         help="Root folder to save data in")
     parser.add_argument("--resume", default='', type=str, help="Resume from checkpoint")
