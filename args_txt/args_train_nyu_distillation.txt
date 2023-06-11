@@ -1,0 +1,38 @@
+--resume ./checkpoints/UnetAdaptiveBins_23-May_20-37-nodebs2-tep25-lr0.000357-wd0.1-5f0a7edd-4fe0-4863-82e0-09c33fc257cd_latest.pt
+--bs 2
+--dataset nyu
+--lr 0.000357
+--wd 0.1
+--div_factor 25
+--final_div_factor 100
+--epochs 25
+--workers 3
+--name UnetAdaptiveBins
+--n_bins 256
+--norm linear
+--w_chamfer 0.1
+--root .
+--data_path ../monocular-depth-estimation-toolbox/data/nyu/
+--gt_path ../monocular-depth-estimation-toolbox/data/nyu/
+--filenames_file ./train_test_inputs/nyudepthv2_train_files_with_gt.txt
+--input_height 416
+--input_width 544
+--min_depth 0.001
+--max_depth 10
+--do_random_rotate
+--degree 2.5
+--validate_every 3029
+--data_path_eval ../monocular-depth-estimation-toolbox/data/nyu/
+--gt_path_eval ../monocular-depth-estimation-toolbox/data/nyu/
+--filenames_file_eval ./train_test_inputs/nyudepthv2_test_files_with_gt.txt
+--min_depth_eval 1e-3
+--max_depth_eval 10
+--eigen_crop
+--encoder_backend tf_efficientnet_b0
+
+--epoch_start_from 23
+--teacher_model ./pretrained/AdaBins_nyu.pt
+--w_bound 0.1
+--w_feature 0
+--w_center 0.1
+--w_prob 0.1
