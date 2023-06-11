@@ -77,6 +77,14 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.resume != "":
         model, opt, epoch = model_io.load_checkpoint(args.resume, model, None)
         args.epoch = epoch
+    else:
+        args.epoch = 0
+
+    if args.epoch_start_from != -1:
+        args.epoch = args.epoch_start_from
+
+    if args.quant == 'bfloat16':
+        model = model.to(torch.bfloat16)
 
     ################################################################################################
 
@@ -107,7 +115,6 @@ def main_worker(gpu, ngpus_per_node, args):
         model = model.cuda()
         model = torch.nn.DataParallel(model)
 
-    args.last_epoch = -1
     train(model, args, epochs=args.epochs, lr=args.lr, device=args.gpu, root=args.root,
           experiment_name=args.name, optimizer_state_dict=opt)
 
@@ -118,7 +125,6 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
     if device is None:
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    epochs += args.epoch
     ###################################### Logging setup #########################################
     print(f"Training {experiment_name}")
 
@@ -189,7 +195,12 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
                 if not batch['has_valid_depth']:
                     continue
 
-            bin_edges, pred = model(img)
+            if args.quant == 'bfloat16':
+                img = img.to(torch.bfloat16)
+            output_dict = model(img)
+            bin_edges, pred = output_dict['bin_edges'], output_dict['pred']
+            bin_edges = bin_edges.float()
+            pred = pred.float()
 
             mask = depth > args.min_depth
             l_dense = criterion_ueff(pred, depth, mask=mask.to(torch.bool), interpolate=True)
@@ -252,7 +263,10 @@ def validate(args, model, test_loader, criterion_ueff, epoch, epochs, device='cp
                 if not batch['has_valid_depth']:
                     continue
             depth = depth.squeeze().unsqueeze(0).unsqueeze(0)
-            bins, pred = model(img)
+            if args.quant == 'bfloat16':
+                img = img.to(torch.bfloat16)
+            output_dict = model(img)
+            bins, pred = output_dict['bin_edges'], output_dict['pred']
 
             mask = depth > args.min_depth
             l_dense = criterion_ueff(pred, depth, mask=mask.to(torch.bool), interpolate=True)
@@ -366,6 +380,8 @@ if __name__ == '__main__':
     parser.add_argument('--eigen_crop', default=True, help='if set, crops according to Eigen NIPS14',
                         action='store_true')
     parser.add_argument('--garg_crop', help='if set, crops according to Garg  ECCV16', action='store_true')
+    parser.add_argument('--epoch_start_from', type=int, help='specify ', default=-1)
+    parser.add_argument('--quant', type=str, help='set quantization type. supported: float16, TODO: qint8', default='')
 
     if sys.argv.__len__() == 2:
         arg_filename_with_prefix = '@' + sys.argv[1]

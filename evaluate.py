@@ -7,14 +7,17 @@ import torch
 import torch.nn as nn
 import torchvision
 import cv2
+import time
 from PIL import Image
 from tqdm import tqdm
 
 import model_io
 from dataloader import DepthDataLoader
 from models import UnetAdaptiveBins
+
 from utils import RunningAverageDict
 
+total_time = 0.
 
 def compute_errors(gt, pred):
     thresh = np.maximum((gt / pred), (pred / gt))
@@ -45,25 +48,39 @@ def compute_errors(gt, pred):
 #     return x * std + mean
 #
 def predict_tta(model, image, args):
-    pred = model(image)[-1]
+    if args.quant == 'bfloat16':
+        image = image.to(torch.bfloat16)
+
+    global total_time
+    cur_time = time.time()
+    pred = model(image)['pred'].float()
+    total_time += time.time() - cur_time
+
     #     pred = utils.depth_norm(pred)
     #     pred = nn.functional.interpolate(pred, depth.shape[-2:], mode='bilinear', align_corners=True)
     #     pred = np.clip(pred.cpu().numpy(), 10, 1000)/100.
     pred = np.clip(pred.cpu().numpy(), args.min_depth, args.max_depth)
 
-    image = torch.Tensor(np.array(image.cpu().numpy())[..., ::-1].copy()).to(device)
+    image = torch.Tensor(np.array(image.float().cpu().numpy())[..., ::-1].copy()).to(device)
+    if args.quant == 'bfloat16':
+        image = image.to(torch.bfloat16)
 
-    pred_lr = model(image)[-1]
+    cur_time = time.time()
+    pred_lr = model(image)['pred'].float()
+    total_time += time.time() - cur_time
+    
     #     pred_lr = utils.depth_norm(pred_lr)
     #     pred_lr = nn.functional.interpolate(pred_lr, depth.shape[-2:], mode='bilinear', align_corners=True)
     #     pred_lr = np.clip(pred_lr.cpu().numpy()[...,::-1], 10, 1000)/100.
     pred_lr = np.clip(pred_lr.cpu().numpy()[..., ::-1], args.min_depth, args.max_depth)
     final = 0.5 * (pred + pred_lr)
+
+    final = pred
     final = nn.functional.interpolate(torch.Tensor(final), image.shape[-2:], mode='bilinear', align_corners=True)
     return torch.Tensor(final)
 
 
-def eval(model, test_loader, args, gpus=None, ):
+def eval(model, test_loader, args, gpus=None):
     if gpus is None:
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     else:
@@ -71,6 +88,13 @@ def eval(model, test_loader, args, gpus=None, ):
 
     if (args.save_dir is not None) and (not (args.save_dir in os.listdir())):
         os.makedirs(args.save_dir)
+
+    if args.interpolation_mode == 'bicubic':
+        torchvision_interpolation=torchvision.transforms.InterpolationMode.BICUBIC
+        cv2_interpolation=cv2.INTER_CUBIC
+    else:
+        torchvision_interpolation=torchvision.transforms.InterpolationMode.BILINEAR
+        cv2_interpolation=cv2.INTER_LINEAR
 
     metrics = RunningAverageDict()
     # crop_size = (471 - 45, 601 - 41)
@@ -84,7 +108,10 @@ def eval(model, test_loader, args, gpus=None, ):
 
             image = batch['image'].to(device)
             if args.input_height != -1 and args.input_width != -1:
-                image = torchvision.transforms.Resize((args.input_height, args.input_width))(image)
+                image = torchvision.transforms.Resize(
+                    (args.input_height, args.input_width),
+                    interpolation=torchvision_interpolation
+                    )(image)
             gt = batch['depth'].to(device)
             final = predict_tta(model, image, args)
             final = final.squeeze().cpu().numpy()
@@ -139,7 +166,7 @@ def eval(model, test_loader, args, gpus=None, ):
             #             final = final[valid_mask]
 
             if args.input_height != -1 and args.input_width != -1:
-                final = cv2.resize(final, (gt.shape[1], gt.shape[0]))
+                final = cv2.resize(final, (gt.shape[1], gt.shape[0]), interpolation=cv2_interpolation)
             metrics.update(compute_errors(gt[valid_mask], final[valid_mask]))
 
     print(f"Total invalid: {total_invalid}")
@@ -163,6 +190,7 @@ if __name__ == '__main__':
     parser.add_argument('--n-bins', '--n_bins', default=256, type=int,
                         help='number of bins/buckets to divide depth range into')
     parser.add_argument('--gpu', default=None, type=int, help='Which gpu to use')
+    parser.add_argument('--load_from_raw_model', action='store_true', help='load raw model if set, else load from checkpoint')
     parser.add_argument('--save-dir', '--save_dir', default=None, type=str, help='Store predictions in folder')
     parser.add_argument("--root", default=".", type=str,
                         help="Root folder to save data in")
@@ -201,6 +229,9 @@ if __name__ == '__main__':
     parser.add_argument('--eigen_crop', help='if set, crops according to Eigen NIPS14', action='store_true')
     parser.add_argument('--garg_crop', help='if set, crops according to Garg  ECCV16', action='store_true')
     parser.add_argument('--do_kb_crop', help='Use kitti benchmark cropping', action='store_true')
+    parser.add_argument('--interpolation_mode', help='if input_height and input_width is set, choose interpolation mode', default='bilinear')
+    parser.add_argument('--quant', type=str, help='Quantization data type', default='')
+    parser.add_argument('--encoder_backend', type=str, help='set encoder backend. default: tf_efficientnet_b5_ap', default='tf_efficientnet_b5_ap')
 
     if sys.argv.__len__() == 2:
         arg_filename_with_prefix = '@' + sys.argv[1]
@@ -212,10 +243,42 @@ if __name__ == '__main__':
     args.gpu = int(args.gpu) if args.gpu is not None else 0
     args.distributed = False
     device = torch.device('cuda:{}'.format(args.gpu))
+    # device = 'cpu'
     test = DepthDataLoader(args, 'online_eval').data
-    model = UnetAdaptiveBins.build(n_bins=args.n_bins, min_val=args.min_depth, max_val=args.max_depth,
-                                   norm='linear').to(device)
-    model = model_io.load_checkpoint(args.checkpoint_path, model)[0]
+    if not args.load_from_raw_model:
+        model = UnetAdaptiveBins.build(n_bins=args.n_bins, min_val=args.min_depth, max_val=args.max_depth,
+                                    norm='linear', basemodel_name=args.encoder_backend).to(device)
+        
+        model, opt, eph = model_io.load_checkpoint(args.checkpoint_path, model)
+        # backend = "fbgemm"
+        # torch.backends.quantized.engine = backend
+
+        if args.quant == 'bfloat16':
+            model = model.to(torch.bfloat16)
+        '''
+        model.qconfig = torch.quantization.get_default_qconfig(backend)
+
+        model.decoder.qconfig = torch.quantization.get_default_qconfig(backend)
+        model.decoder = torch.quantization.prepare(model.decoder, inplace=False)
+        model.decoder = torch.quantization.convert(model.decoder, inplace=False)
+
+        model.adaptive_bins_layer.qconfig = torch.quantization.get_default_qconfig(backend)
+        model.adaptive_bins_layer = torch.quantization.prepare(model.adaptive_bins_layer, inplace=False)
+        model.adaptive_bins_layer = torch.quantization.convert(model.adaptive_bins_layer, inplace=False)
+
+        model.conv_out.qconfig = torch.quantization.get_default_qconfig(backend)
+        model.conv_out = torch.quantization.prepare(model.conv_out, inplace=False)
+        model.conv_out = torch.quantization.convert(model.conv_out, inplace=False)
+        '''
+
+        quantized_model = torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+        model_io.save_weights(model, './quantized_float.pt')
+    else:
+        model = torch.load(args.checkpoint_path)
     model = model.eval()
+    quantized_model.eval()
 
     eval(model, test, args, gpus=[device])
+    print(f"Model param no.: {sum(p.numel() for p in model.parameters())}")
+    print(f"Total time for model run: {total_time:.3f}s")
+    print(f"encoder-decoder time: {model.ed_time:.3f}s")

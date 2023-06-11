@@ -19,9 +19,13 @@ class mViT(nn.Module):
                                        nn.Linear(256, 256),
                                        nn.LeakyReLU(),
                                        nn.Linear(256, dim_out))
+        
+        self.quant = torch.ao.quantization.QuantStub()
+        self.dequant = torch.ao.quantization.DeQuantStub()
 
     def forward(self, x):
         # n, c, h, w = x.size()
+
         tgt = self.patch_transformer(x.clone())  # .shape = S, N, E
 
         x = self.conv3x3(x)
@@ -42,4 +46,5 @@ class mViT(nn.Module):
         else:
             y = torch.sigmoid(y)
         y = y / y.sum(dim=1, keepdim=True)
+
         return y, range_attention_maps

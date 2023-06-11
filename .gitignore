@@ -7,5 +7,6 @@ predictions_kitti/
 wandb/
 checkpoints/
 pretrained/
-vscode/
+.vscode/
 memo.txt
+saved_models/

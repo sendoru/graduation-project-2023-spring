@@ -8,7 +8,7 @@ def save_weights(model, filename, path="./saved_models"):
         os.makedirs(path)
 
     fpath = os.path.join(path, filename)
-    torch.save(model.state_dict(), fpath)
+    torch.save({"model": model.state_dict()}, fpath)
     return
 
 
@@ -17,19 +17,27 @@ def save_checkpoint(model, optimizer, epoch, filename, root="./checkpoints"):
         os.makedirs(root)
 
     fpath = os.path.join(root, filename)
-    torch.save(
+    if type(optimizer) == dict:
+        torch.save(
         {
             "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
+            "optimizer": optimizer,
             "epoch": epoch
         }
         , fpath)
+    else:
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch
+            }
+            , fpath)
 
 
-def load_weights(model, filename, path="./saved_models"):
-    fpath = os.path.join(path, filename)
-    state_dict = torch.load(fpath)
-    model.load_state_dict(state_dict)
+def load_weights(fpath, model):
+    state_dict = torch.load(fpath, map_location='cpu')
+    model.load_state_dict(state_dict["model"])
     return model
 
 

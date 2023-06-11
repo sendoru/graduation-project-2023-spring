@@ -71,8 +71,8 @@ class InferenceHelper:
             self.min_depth = 1e-3
             self.max_depth = 10
             self.saving_factor = 1000  # used to save in 16 bit
-            model = UnetAdaptiveBins.build(n_bins=256, min_val=self.min_depth, max_val=self.max_depth)
-            pretrained_path = "./pretrained/AdaBins_nyu.pt"
+            model = UnetAdaptiveBins.build(n_bins=256, min_val=self.min_depth, max_val=self.max_depth, basemodel_name='tf_efficientnet_b0')
+            pretrained_path = "./checkpoints/UnetAdaptiveBins_24-May_08-12-nodebs2-tep25-lr0.000357-wd0.1-ce035875-9398-423f-9846-950cbcd81749_best.pt"
         elif dataset == 'kitti':
             self.min_depth = 1e-3
             self.max_depth = 80
@@ -82,7 +82,13 @@ class InferenceHelper:
         else:
             raise ValueError("dataset can be either 'nyu' or 'kitti' but got {}".format(dataset))
 
-        model, _, _ = model_io.load_checkpoint(pretrained_path, model)
+        model, opt, eph = model_io.load_checkpoint(pretrained_path, model)
+        '''
+        model_io.save_weights(model, 'float.pt')
+        model_dquant = torch.quantization.quantize_dynamic(model, qconfig_spec={nn.Linear}, dtype=torch.qint8)
+        model_io.save_weights(model_dquant, 'qint8.pt')
+        model_io.save_weights(model.half(), 'half.pt')
+        '''
         model.eval()
         self.model = model.to(self.device)
 
@@ -92,6 +98,7 @@ class InferenceHelper:
         img = np.asarray(pil_image) / 255.
 
         img = self.toTensor(img).unsqueeze(0).float().to(self.device)
+        # img = img.half()
         bin_centers, pred = self.predict(img)
 
         if visualized:
@@ -103,13 +110,21 @@ class InferenceHelper:
 
     @torch.no_grad()
     def predict(self, image):
-        bins, pred = self.model(image)
-        pred = np.clip(pred.cpu().numpy(), self.min_depth, self.max_depth)
+        # self.model = self.model.to(torch.bfloat16)
+        
+        # model_io.save_weights(self.model, 'partial_half.pt')
+        # image = image.to(torch.bfloat16)
+        model_output = self.model(image)
+        bins = model_output['bin_edges']
+        pred = model_output['pred']
+        pred = np.clip(pred.float().cpu().numpy(), self.min_depth, self.max_depth)
 
         # Flip
-        image = torch.Tensor(np.array(image.cpu().numpy())[..., ::-1].copy()).to(self.device)
-        pred_lr = self.model(image)[-1]
-        pred_lr = np.clip(pred_lr.cpu().numpy()[..., ::-1], self.min_depth, self.max_depth)
+        image = torch.Tensor(np.array(image.float().cpu().numpy())[..., ::-1].copy()).to(self.device)
+        # image = image.half()
+        # image = image.to(torch.bfloat16)
+        pred_lr = self.model(image)['pred']
+        pred_lr = np.clip(pred_lr.float().cpu().numpy()[..., ::-1], self.min_depth, self.max_depth)
 
         # Take average of original and mirror
         final = 0.5 * (pred + pred_lr)
@@ -122,7 +137,7 @@ class InferenceHelper:
         final[np.isnan(final)] = self.min_depth
 
         centers = 0.5 * (bins[:, 1:] + bins[:, :-1])
-        centers = centers.cpu().squeeze().numpy()
+        centers = centers.float().cpu().squeeze().numpy()
         centers = centers[centers > self.min_depth]
         centers = centers[centers < self.max_depth]
 
